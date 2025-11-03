@@ -1,10 +1,59 @@
 version: "3.9"
 
-# =========
-# MEGA / Chatwoot custom
-# =========
 services:
-  # Redis usado pelo Chatwoot
+  # -----------------------------
+  # Banco para o SSO (Keycloak)
+  # -----------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=keycloak
+      - POSTGRES_USER=${POSTGRES_USER:-keycloak}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?defina_no_coolify}
+      - TZ=America/Sao_Paulo
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  # -------------
+  # SSO Keycloak (porta interna 8080)
+  # -------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:?defina_no_coolify}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_USERNAME=${POSTGRES_USER:-keycloak}
+      - KC_DB_PASSWORD=${POSTGRES_PASSWORD:?defina_no_coolify}
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_HOSTNAME=${SSO_PUBLIC_URL:?defina_no_coolify}
+      - KC_HOSTNAME_STRICT=false
+      - KC_HTTP_ENABLED=true
+      - TZ=America/Sao_Paulo
+    command: ["start", "--optimized"]
+
+  # -----------------------------
+  # Storage (MinIO) – Console 9001 | API S3 9000
+  # -----------------------------
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?defina_no_coolify}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?defina_no_coolify}
+      - TZ=America/Sao_Paulo
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+
+  # -----------------------------
+  # Redis (compartilhado por Mega/WAHA/etc.)
+  # -----------------------------
   example_redis:
     image: redis:7.4.2
     restart: unless-stopped
@@ -12,7 +61,38 @@ services:
     volumes:
       - redis-data:/data
 
-  # Aplicação web (porta interna 3000)
+  # -----------------------------
+  # WAHA (WhatsApp HTTP API) – porta interna 3000
+  # -----------------------------
+  waha:
+    image: devlikeapro/waha:latest
+    restart: unless-stopped
+    depends_on:
+      - example_redis
+    environment:
+      - TZ=America/Sao_Paulo
+      - WAHA_PUBLIC_URL=${WAHA_PUBLIC_URL:?defina_no_coolify}
+      - WHATSAPP_DEFAULT_ENGINE=${WHATSAPP_DEFAULT_ENGINE:-WEBJS}
+      - REDIS_URL=redis://example_redis:6379
+    volumes:
+      - waha-sessions:/app/.sessions
+
+  # -----------------------------
+  # Evolution API – porta interna 8080
+  # -----------------------------
+  evolution:
+    image: atendai/evolution-api:latest
+    restart: unless-stopped
+    environment:
+      - TZ=America/Sao_Paulo
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?defina_no_coolify}
+    volumes:
+      - evolution-store:/evolution/store
+      - evolution-instances:/evolution/instances
+
+  # -----------------------------
+  # MEGA (Chatwoot custom) – Web (porta interna 3000)
+  # -----------------------------
   mega_app:
     image: sendingtk/chatwoot:v4.7.2
     entrypoint: docker/entrypoints/rails.sh
@@ -22,12 +102,12 @@ services:
       - example_redis
     volumes:
       - examplechat_dat:/app/storage
-      # Se for usar branding, descomente e aponte os caminhos do host
+      # Branding (opcional): descomente e ajuste caminhos do host, se for usar
       # - /opt/branding/mega/manifest.json:/app/public/manifest.json
       # - /opt/branding/mega/favicon.ico:/app/public/favicon.ico
-      # ... (demais arquivos de branding)
+      # ... (demais arquivos)
     environment:
-      # === Vars essenciais ===
+      # ====== Variáveis essenciais do Mega/Chatwoot ======
       INSTALLATION_NAME: ${INSTALLATION_NAME:-ExampleChat}
       NODE_ENV: ${NODE_ENV:-production}
       RAILS_ENV: ${RAILS_ENV:-production}
@@ -38,7 +118,7 @@ services:
       FORCE_SSL: ${FORCE_SSL:-true}
       ENABLE_ACCOUNT_SIGNUP: ${ENABLE_ACCOUNT_SIGNUP:-false}
 
-      # Redis e Postgres (DB externo ou do próprio Coolify, você decide)
+      # Redis e Postgres (Chatwoot usa DB externo)
       REDIS_URL: ${REDIS_URL:-redis://example_redis:6379}
       POSTGRES_HOST: ${POSTGRES_HOST:?defina_no_coolify}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
@@ -46,9 +126,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina_no_coolify}
       POSTGRES_DATABASE: ${POSTGRES_DATABASE:?defina_no_coolify}
 
-      # Storage (padrão: local). Troque para S3/minio se quiser.
+      # Storage (padrão: local). Ajuste para S3/MinIO se quiser.
       ACTIVE_STORAGE_SERVICE: ${ACTIVE_STORAGE_SERVICE:-local}
-      # Exemplo S3/minio (opcional):
+      # Exemplo S3/MinIO (opcionais)
       # S3_BUCKET_NAME: ${S3_BUCKET_NAME}
       # AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
@@ -64,7 +144,7 @@ services:
       RAILS_LOG_TO_STDOUT: ${RAILS_LOG_TO_STDOUT:-true}
       USE_INBOX_AVATAR_FOR_BOT: ${USE_INBOX_AVATAR_FOR_BOT:-true}
 
-      # E-mail SMTP
+      # SMTP
       MAILER_SENDER_EMAIL: ${MAILER_SENDER_EMAIL:?defina_no_coolify}
       SMTP_DOMAIN: ${SMTP_DOMAIN:?defina_no_coolify}
       SMTP_ADDRESS: ${SMTP_ADDRESS:?defina_no_coolify}
@@ -98,7 +178,9 @@ services:
       # SSO (se usar)
       SSO: ${SSO:-false}
 
-  # Worker (Sidekiq)
+  # -----------------------------
+  # Worker do Mega (Sidekiq)
+  # -----------------------------
   mega_sidekiq:
     image: sendingtk/chatwoot:v4.7.2
     entrypoint: docker/entrypoints/rails.sh
@@ -109,7 +191,7 @@ services:
     volumes:
       - examplechat_dat:/app/storage
     environment:
-      # Mesmas variáveis do app
+      # Repete as mesmas variáveis do mega_app
       INSTALLATION_NAME: ${INSTALLATION_NAME:-ExampleChat}
       NODE_ENV: ${NODE_ENV:-production}
       RAILS_ENV: ${RAILS_ENV:-production}
@@ -156,6 +238,37 @@ services:
       UAZAPI_ADMIN_TOKEN: ${UAZAPI_ADMIN_TOKEN}
       SSO: ${SSO:-false}
 
+  # -----------------------------
+  # (Opcional) Job de migração: execute 1x e remova
+  # -----------------------------
+  # mega_migrate:
+  #   image: sendingtk/chatwoot:v4.7.2
+  #   entrypoint: docker/entrypoints/rails.sh
+  #   command: bundle exec rails db:chatwoot_prepare
+  #   restart: "no"
+  #   depends_on:
+  #     - example_redis
+  #   environment:
+  #     # Mesmas variáveis do mega_app (copie/cole ou use as mesmas)
+  #     INSTALLATION_NAME: ${INSTALLATION_NAME:-ExampleChat}
+  #     NODE_ENV: ${NODE_ENV:-production}
+  #     RAILS_ENV: ${RAILS_ENV:-production}
+  #     INSTALLATION_ENV: docker
+  #     SECRET_KEY_BASE: ${SECRET_KEY_BASE:?defina_no_coolify}
+  #     FRONTEND_URL: ${FRONTEND_URL:?defina_no_coolify}
+  #     REDIS_URL: ${REDIS_URL:-redis://example_redis:6379}
+  #     POSTGRES_HOST: ${POSTGRES_HOST:?defina_no_coolify}
+  #     POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  #     POSTGRES_USERNAME: ${POSTGRES_USERNAME:?defina_no_coolify}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina_no_coolify}
+  #     POSTGRES_DATABASE: ${POSTGRES_DATABASE:?defina_no_coolify}
+  #     TZ: ${TZ:-UTC}
+
 volumes:
-  examplechat_dat:
+  pg-data:
+  minio-data:
   redis-data:
+  waha-sessions:
+  evolution-store:
+  evolution-instances:
+  examplechat_dat:
